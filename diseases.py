@@ -37,7 +37,6 @@ class AdvancedLeafDiseaseApp:
         self.setup_styles()
         self.create_ui()
         self.root.after(500,self.show_welcome_message)
-        
     def show_welcome_message(self):
         welcome_text = (
         "🌿 Welcome to Advanced Leaf Disease Detection System 🌿\n\n"
