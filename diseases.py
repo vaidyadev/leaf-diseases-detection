@@ -13,6 +13,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import threading
 from pathlib import Path
 from collections import Counter
+import traceback
+
 
 class AdvancedLeafDiseaseApp:
     def __init__(self, root):
@@ -29,14 +31,23 @@ class AdvancedLeafDiseaseApp:
         self.video_path = None
         self.webcam_active = False
         self.cap = None
+        self.detection_lock = threading.Lock()  # Thread safety for results
         
         # Load model
-        self.load_model()
-        
+        self.load_models()
+        # Auto model switching helpers
+        self.crop_class_map = {
+            "Tomato": "Tomato",
+            "grape": "Grapes"
+        }
+
+        self.auto_switched = False  # prevents repeated switching
+
         # Setup UI
         self.setup_styles()
         self.create_ui()
-        self.root.after(500,self.show_welcome_message)
+        self.root.after(500, self.show_welcome_message)
+    
     def show_welcome_message(self):
         welcome_text = (
         "🌿 Welcome to Advanced Leaf Disease Detection System 🌿\n\n"
@@ -53,23 +64,28 @@ class AdvancedLeafDiseaseApp:
         "💡 Tips:\n"
         "- Use high-quality, well-lit images for best results.\n"
         "- Adjust confidence threshold if detections are too many/too few.\n"
-        "- Check 'Analysis' tab for statistical insights."
+        "- Check 'Analysis' tab for statistical insights.\n"
         "- View application at maximum size and resolution"
-    )
+        )
         messagebox.showinfo("Welcome", welcome_text)
 
-    def load_model(self):
-        """Load YOLOv8 model with error handling"""
-        MODEL_PATH = "best.pt"
+    def load_models(self):
+        """Load all crop-specific YOLO models"""
         try:
-            self.model = YOLO(MODEL_PATH)
-            print("✅ Model loaded successfully")
+            self.models = {
+                "Tomato": YOLO("models/tomato_best.pt"),
+                "Mango": YOLO("models/mango_best.pt"),
+                "Rice": YOLO("models/rice_best.pt"),
+                "Grapes": YOLO("models/grapes_best.pt"),
+                "General": YOLO("models/general_best.pt")
+            }
+            self.model = self.models["Tomato"]  # default
+            print("✓ All models loaded successfully")
         except Exception as e:
-            messagebox.showerror("Model Load Error", 
-                               f"Could not load YOLO model: {e}\n\nPlease ensure 'best.pt' is in the same directory.")
+            messagebox.showerror("Model Load Error", f"Error loading models:\n{str(e)}\n\nPlease ensure model files exist in the 'models' directory.")
+            self.models = {}
             self.model = None
-        
-    
+
     def setup_styles(self):
         """Setup custom styles for ttk widgets with a colorful theme"""
         self.style = ttk.Style()
@@ -81,11 +97,11 @@ class AdvancedLeafDiseaseApp:
             'select_bg': '#C8E6C9', # A slightly darker light green
             'select_fg': '#2E2E2E',
             'button_bg': '#4CAF50', # Vibrant green
-            'button_fg': "#7C1280", # White text
+            'button_fg': "#2256C7", # 
             'accent': '#66BB6A', # Brighter green
             'border': '#A5D6A7', # Border color
             'heading_bg': '#388E3C', # Dark green for headings
-            'heading_fg': "#78810C"
+            'heading_fg': "#FFFFFF"  # White text for headings (fixed)
         }
         
         # Set main window background
@@ -144,13 +160,13 @@ class AdvancedLeafDiseaseApp:
         
         ttk.Button(controls_frame, text="📂 Load Image", 
                   command=self.load_image).pack(fill='x', pady=2)
-        ttk.Button(controls_frame, text="📹 Load Video", 
+        ttk.Button(controls_frame, text="🎬 Load Video", 
                   command=self.load_video).pack(fill='x', pady=2)
         ttk.Button(controls_frame, text="🎥 Start Webcam", 
                   command=self.start_webcam).pack(fill='x', pady=2)
         ttk.Button(controls_frame, text="🛑 Stop Webcam", 
                   command=self.stop_webcam).pack(fill='x', pady=2)
-        ttk.Button(controls_frame, text="🔍 Detect Disease", 
+        ttk.Button(controls_frame, text="🔬 Detect Disease", 
                   command=self.detect_disease).pack(fill='x', pady=2)
         ttk.Button(controls_frame, text="💾 Save Results", 
                   command=self.save_results).pack(fill='x', pady=2)
@@ -292,6 +308,39 @@ class AdvancedLeafDiseaseApp:
         
         self.update_charts()
     
+    def change_model(self, event=None):
+        crop = self.crop_var.get()
+        self.model = self.models.get(crop)
+        self.update_status(f"{crop} model loaded")
+
+    def auto_switch_model(self, detections):
+        """
+        Automatically switch to crop-specific model if crop detected
+        """
+        if self.auto_switched:
+            return False
+
+        for det in detections:
+            label = det['disease'].lower()
+            confidence = det['confidence']
+
+            if confidence >= 0.6:
+                if "tomato" in label:
+                    crop = "Tomato"
+                elif "grape" in label:
+                    crop = "Grapes"
+                else:
+                    continue
+
+                if crop in self.models:
+                    self.model = self.models[crop]
+                    self.crop_var.set(crop)
+                    self.auto_switched = True
+                    self.update_status(f"Auto-switched to {crop} model")
+                    return True
+
+        return False
+
     def create_settings_tab(self):
         """Create settings and preferences tab"""
         self.settings_frame = ttk.Frame(self.notebook)
@@ -300,6 +349,20 @@ class AdvancedLeafDiseaseApp:
         model_frame = ttk.LabelFrame(self.settings_frame, text="Model Settings", padding=5)
         model_frame.pack(fill='x', padx=5, pady=5)
         
+        ttk.Label(model_frame, text="Select Crop:").pack(anchor='w')
+
+        self.crop_var = tk.StringVar(value="General")
+
+        crop_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.crop_var,
+            values=["General", "Mango", "Rice", "Grapes", "Tomato"],
+            state="readonly"
+        )
+        crop_combo.pack(fill='x', pady=2)
+        crop_combo.bind("<<ComboboxSelected>>", self.change_model)
+
+
         ttk.Label(model_frame, text="Model Path:").pack(anchor='w')
         self.model_path_var = tk.StringVar(value="best.pt")
         ttk.Entry(model_frame, textvariable=self.model_path_var).pack(fill='x', pady=2)
@@ -357,6 +420,7 @@ Built with YOLOv8 and modern UI components."""
         
         if file_path:
             self.img_path = file_path
+            self.auto_switched = False  # Reset auto-switch flag
             self.video_path = None
             self.display_image(file_path)
             self.update_status(f"Loaded: {os.path.basename(file_path)}")
@@ -374,6 +438,7 @@ Built with YOLOv8 and modern UI components."""
         
         if file_path:
             self.video_path = file_path
+            self.auto_switched = False  # Reset auto-switch flag
             self.img_path = None
             self.update_status(f"Loaded video: {os.path.basename(file_path)}")
             threading.Thread(target=self._process_video_thread, daemon=True).start()
@@ -385,10 +450,17 @@ Built with YOLOv8 and modern UI components."""
         
         self.img_path = None
         self.video_path = None
+        self.auto_switched = False  # Reset auto-switch flag
+        
         try:
-            self.cap = cv2.VideoCapture(1)
+            # Try default webcam (index 0) first, fallback to index 1
+            self.cap = cv2.VideoCapture(0)
             if not self.cap.isOpened():
-                raise Exception("Could not open webcam")
+                self.cap = cv2.VideoCapture(1)
+            
+            if not self.cap.isOpened():
+                raise Exception("Could not open any webcam (tried indices 0 and 1)")
+            
             self.webcam_active = True
             self.update_status("Webcam started")
             threading.Thread(target=self._process_webcam_thread, daemon=True).start()
@@ -414,6 +486,8 @@ Built with YOLOv8 and modern UI components."""
             else:
                 return
             
+            # Wait for canvas to be rendered
+            self.root.update_idletasks()
             canvas_width = self.image_canvas.winfo_width()
             canvas_height = self.image_canvas.winfo_height()
             
@@ -433,6 +507,7 @@ Built with YOLOv8 and modern UI components."""
             )
             
         except Exception as e:
+            print(f"Display error: {traceback.format_exc()}")
             messagebox.showerror("Error", f"Could not display image: {e}")
     
     def enhance_image(self, event=None):
@@ -451,6 +526,8 @@ Built with YOLOv8 and modern UI components."""
                 enhancer = ImageEnhance.Contrast(image)
                 image = enhancer.enhance(self.contrast_var.get())
             
+            # Wait for canvas to be rendered
+            self.root.update_idletasks()
             canvas_width = self.image_canvas.winfo_width()
             canvas_height = self.image_canvas.winfo_height()
             
@@ -469,6 +546,7 @@ Built with YOLOv8 and modern UI components."""
             )
             
         except Exception as e:
+            print(f"Enhancement error: {traceback.format_exc()}")
             messagebox.showerror("Error", f"Could not enhance image: {e}")
     
     def reset_enhancements(self):
@@ -477,11 +555,21 @@ Built with YOLOv8 and modern UI components."""
         self.contrast_var.set(1.0)
         if self.img_path and not self.video_path and not self.webcam_active:
             self.display_image(self.img_path)
+        self.update_status("Enhancements reset")
 
     def reset(self):
+        """Reset detection parameters"""
         self.confidence_var.set(0.4)
-        
+        self.update_status("Parameters reset")
     
+    def limit_detection_history(self):
+        """Limit detection history to prevent memory issues"""
+        MAX_HISTORY = 1000
+        KEEP_HISTORY = 500
+        
+        if len(self.detection_history) > MAX_HISTORY:
+            self.detection_history = self.detection_history[-KEEP_HISTORY:]
+            
     def detect_disease(self):
         """Detect diseases in the current input"""
         if not (self.img_path or self.video_path or self.webcam_active):
@@ -503,69 +591,114 @@ Built with YOLOv8 and modern UI components."""
             pass
     
     def _detect_disease_thread(self):
-        """Thread function for disease detection on single image"""
+        """Thread function for disease detection on single image with auto model switching"""
         try:
+            # -------- First pass (Current model) --------
             results = self.model.predict(
-                self.img_path, 
-                save=True, 
-                imgsz=int(self.img_size_var.get()), 
+                self.img_path,
+                save=True,
+                imgsz=int(self.img_size_var.get()),
                 conf=self.confidence_var.get(),
                 device="cuda" if torch.cuda.is_available() else "cpu"
             )
-            
+
             result = results[0]
-            
             self.root.after(0, self._clear_results)
-            
+
             detections = []
             for box in result.boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
                 label = self.model.names[cls_id]
-                
+
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 location = f"({int(x1)}, {int(y1)}) - ({int(x2)}, {int(y2)})"
-                
+
                 detections.append({
                     'disease': label,
                     'confidence': conf,
                     'location': location,
                     'bbox': (x1, y1, x2, y2)
                 })
-            
-            self.root.after(0, lambda: self._update_detection_results(detections))
-            
+
+            # -------- Auto model switching --------
+            switched = self.auto_switch_model(detections)
+
+            # -------- Second pass (Crop-specific model) if switched --------
+            if switched:
+                # Clear old results before re-detection
+                self.root.after(0, self._clear_results)
+                
+                results = self.model.predict(
+                    self.img_path,
+                    save=True,
+                    imgsz=int(self.img_size_var.get()),
+                    conf=self.confidence_var.get(),
+                    device="cuda" if torch.cuda.is_available() else "cpu"
+                )
+
+                result = results[0]
+                detections = []
+
+                for box in result.boxes:
+                    cls_id = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    label = self.model.names[cls_id]
+
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    location = f"({int(x1)}, {int(y1)}) - ({int(x2)}, {int(y2)})"
+
+                    detections.append({
+                        'disease': label,
+                        'confidence': conf,
+                        'location': location,
+                        'bbox': (x1, y1, x2, y2)
+                    })
+
+            # -------- Update UI with thread safety --------
+            with self.detection_lock:
+                self.root.after(0, lambda: self._update_detection_results(detections))
+
             if detections:
                 save_dir = result.save_dir
                 img_file = os.path.join(save_dir, os.path.basename(self.img_path))
                 self.root.after(0, lambda: self.display_image(img_file))
-            
+
+            # -------- Save history with memory limit --------
             detection_record = {
                 'timestamp': datetime.now().isoformat(),
                 'image_path': self.img_path,
                 'detections': detections
             }
             self.detection_history.append(detection_record)
-            
-            status_msg = f"Detection complete. Found {len(detections)} disease(s)."
-            self.root.after(0, lambda: self.update_status(status_msg))
-            
+            self.limit_detection_history()
+
+            self.root.after(
+                0,
+                lambda: self.update_status(
+                    f"Detection complete. Found {len(detections)} disease(s)."
+                )
+            )
+
         except Exception as e:
+            print(f"Detection error: {traceback.format_exc()}")
             self.root.after(0, lambda: messagebox.showerror("Detection Error", str(e)))
             self.root.after(0, lambda: self.update_status("Detection failed"))
-            print(e)
-    
+
     def _process_video_thread(self):
         """Thread function for video processing"""
         try:
             cap = cv2.VideoCapture(self.video_path)
             if not cap.isOpened():
                 raise Exception("Could not open video file")
-                
+            
+            frame_count = 0
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
+                
+                frame_count += 1
                     
                 results = self.model.predict(
                     frame,
@@ -592,20 +725,24 @@ Built with YOLOv8 and modern UI components."""
                         'bbox': (x1, y1, x2, y2)
                     })
                 
-                self.root.after(0, self._clear_results)
-                self.root.after(0, lambda: self._update_detection_results(detections))
+                with self.detection_lock:
+                    self.root.after(0, self._clear_results)
+                    self.root.after(0, lambda d=detections: self._update_detection_results(d))
                 
                 annotated_frame = result.plot()
-                self.root.after(0, lambda f=annotated_frame: self.display_image(frame=f))
+                self.root.after(0, lambda af=annotated_frame: self.display_image(frame=af))
                 
-                detection_record = {
-                    'timestamp': datetime.now().isoformat(),
-                    'image_path': f"video_frame_{datetime.now().timestamp()}",
-                    'detections': detections
-                }
-                self.detection_history.append(detection_record)
+                # Only save every 10th frame to history to reduce memory usage
+                if frame_count % 10 == 0:
+                    detection_record = {
+                        'timestamp': datetime.now().isoformat(),
+                        'image_path': f"video_frame_{frame_count}",
+                        'detections': detections
+                    }
+                    self.detection_history.append(detection_record)
+                    self.limit_detection_history()
                 
-                self.root.after(0, lambda: self.update_status(f"Processing video frame: {len(self.detection_history)} diseases found"))
+                self.root.after(0, lambda d=len(detections): self.update_status(f"Processing video: {d} diseases found in current frame"))
                 
                 cv2.waitKey(33)  # Approximately 30 FPS
                 
@@ -613,16 +750,20 @@ Built with YOLOv8 and modern UI components."""
             self.root.after(0, lambda: self.update_status("Video processing complete"))
             
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Video Processing Error", str(e)))
+            print(f"Video processing error: {traceback.format_exc()}")
+            self.root.after(0, lambda err=str(e): messagebox.showerror("Video Processing Error", err))
             self.root.after(0, lambda: self.update_status("Video processing failed"))
     
     def _process_webcam_thread(self):
         """Thread function for webcam processing"""
         try:
-            while self.webcam_active and self.cap.isOpened():
+            frame_count = 0
+            while self.webcam_active and self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if not ret:
                     break
+                
+                frame_count += 1
                     
                 results = self.model.predict(
                     frame,
@@ -649,25 +790,30 @@ Built with YOLOv8 and modern UI components."""
                         'bbox': (x1, y1, x2, y2)
                     })
                 
-                self.root.after(0, self._clear_results)
-                self.root.after(0, lambda: self._update_detection_results(detections))
+                with self.detection_lock:
+                    self.root.after(0, self._clear_results)
+                    self.root.after(0, lambda d=detections: self._update_detection_results(d))
                 
                 annotated_frame = result.plot()
-                self.root.after(0, lambda f=annotated_frame: self.display_image(frame=f))
+                self.root.after(0, lambda af=annotated_frame: self.display_image(frame=af))
                 
-                detection_record = {
-                    'timestamp': datetime.now().isoformat(),
-                    'image_path': f"webcam_frame_{datetime.now().timestamp()}",
-                    'detections': detections
-                }
-                self.detection_history.append(detection_record)
+                # Only save every 30th frame to history to reduce memory usage
+                if frame_count % 30 == 0:
+                    detection_record = {
+                        'timestamp': datetime.now().isoformat(),
+                        'image_path': f"webcam_frame_{frame_count}",
+                        'detections': detections
+                    }
+                    self.detection_history.append(detection_record)
+                    self.limit_detection_history()
                 
-                self.root.after(0, lambda: self.update_status(f"Processing webcam: {len(detections)} diseases found"))
+                self.root.after(0, lambda d=len(detections): self.update_status(f"Webcam: {d} diseases found"))
                 
                 cv2.waitKey(33)  # Approximately 30 FPS
                 
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Webcam Processing Error", str(e)))
+            print(f"Webcam processing error: {traceback.format_exc()}")
+            self.root.after(0, lambda err=str(e): messagebox.showerror("Webcam Processing Error", err))
             self.root.after(0, lambda: self.update_status("Webcam processing failed"))
     
     def _clear_results(self):
@@ -700,7 +846,9 @@ Built with YOLOv8 and modern UI components."""
                 with open(file_path, 'w') as f:
                     json.dump(self.detection_history, f, indent=2)
                 self.update_status(f"Results saved to {file_path}")
+                messagebox.showinfo("Success", f"Results saved successfully to:\n{file_path}")
             except Exception as e:
+                print(f"Save error: {traceback.format_exc()}")
                 messagebox.showerror("Error", f"Could not save results: {e}")
     
     def select_batch_folder(self):
@@ -738,9 +886,9 @@ Built with YOLOv8 and modern UI components."""
         
         for i, img_path in enumerate(self.batch_images):
             try:
-                progress = (i / total_images) * 100
+                progress = ((i + 1) / total_images) * 100
                 self.root.after(0, lambda p=progress: self.progress_var.set(p))
-                self.root.after(0, lambda: self.update_status(f"Processing {i+1}/{total_images}"))
+                self.root.after(0, lambda idx=i: self.update_status(f"Processing {idx+1}/{total_images}"))
                 
                 results = self.model.predict(
                     img_path, 
@@ -770,6 +918,7 @@ Built with YOLOv8 and modern UI components."""
                               )))
                 
             except Exception as e:
+                print(f"Batch processing error for {img_path}: {traceback.format_exc()}")
                 self.root.after(0, lambda p=img_path, err=str(e): 
                               self.batch_tree.insert('', 'end', values=(
                                   os.path.basename(p), "Error", err, "N/A"
@@ -777,6 +926,7 @@ Built with YOLOv8 and modern UI components."""
         
         self.root.after(0, lambda: self.progress_var.set(100))
         self.root.after(0, lambda: self.update_status("Batch processing complete"))
+        self.root.after(0, lambda: messagebox.showinfo("Batch Complete", f"Processed {total_images} images successfully!"))
     
     def export_batch_report(self):
         """Export batch processing report"""
@@ -801,7 +951,9 @@ Built with YOLOv8 and modern UI components."""
                         writer.writerow(values)
                 
                 self.update_status(f"Batch report exported to {file_path}")
+                messagebox.showinfo("Success", f"Report exported to:\n{file_path}")
             except Exception as e:
+                print(f"Export error: {traceback.format_exc()}")
                 messagebox.showerror("Error", f"Could not export report: {e}")
     
     def update_charts(self):
@@ -809,6 +961,7 @@ Built with YOLOv8 and modern UI components."""
         if not self.detection_history:
             for ax in [self.ax1, self.ax2, self.ax3, self.ax4]:
                 ax.clear()
+                ax.set_facecolor(self.colorful_palette['select_bg'])
                 ax.text(0.5, 0.5, 'No data available', 
                        horizontalalignment='center', verticalalignment='center',
                        transform=ax.transAxes, color=self.colorful_palette['fg'])
@@ -894,26 +1047,22 @@ Built with YOLOv8 and modern UI components."""
             try:
                 self.fig.savefig(file_path, dpi=300, bbox_inches='tight')
                 self.update_status(f"Charts saved to {file_path}")
+                messagebox.showinfo("Success", f"Charts saved to:\n{file_path}")
             except Exception as e:
+                print(f"Save charts error: {traceback.format_exc()}")
                 messagebox.showerror("Error", f"Could not save charts: {e}")
     
     def reload_model(self):
         """Reload the YOLO model"""
-        model_path = self.model_path_var.get()
-        
-        try:
-            self.model = YOLO(model_path)
-            self.update_status(f"Model reloaded from {model_path}")
-            messagebox.showinfo("Success", "Model reloaded successfully!")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not reload model: {e}")
-            self.model = None
+        self.load_models()
+        messagebox.showinfo("success","all models loaded successfully")
     
     def on_closing(self):
         """Handle application closing"""
         self.stop_webcam()
         if messagebox.askokcancel("Quit", "Do you want to quit?"):
             self.root.destroy()
+
 
 def main():
     """Main function to run the application"""
@@ -929,6 +1078,7 @@ def main():
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
