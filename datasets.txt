@@ -1,0 +1,5 @@
+tomato-:      https://universe.roboflow.com/dyploma/tomato-leaf-diseases-4xa5i
+mango-:       https://universe.roboflow.com/mariomartuaa/mango-leaf-disease-dd1ab
+grapes-:      https://universe.roboflow.com/freeaccount/grape-leaf-disease
+rice-:        https://universe.roboflow.com/crop-diseases-l2qhk/detecting-rice-crop-diseases
+general-:     https://universe.roboflow.com/graduation-project-2023/plants-diseases-detection-and-classification
